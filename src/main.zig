@@ -41,6 +41,55 @@ const Process = struct {
     }
 };
 
+const Recorder = struct {
+    child: ?std.process.Child = null,
+    child_args: [][]const u8,
+
+    pub fn init(allocator: std.mem.Allocator, process: *const Process, config: *const Config) !Recorder {
+        const datestr = try get_datestr(allocator);
+        defer allocator.free(datestr);
+
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}-{s}.mp4", .{config.output_dir, process.name, datestr});
+        defer allocator.free(full_path);
+
+        const args_tmp = [_][]const u8 {
+            "wf-recorder", 
+            "-f", full_path, 
+            "--framerate", try config.framerate_as_str(allocator), 
+            "--overwrite",
+            "--geometry", try std.fmt.allocPrint(allocator, "{},{} {}x{}", .{
+                process.geometry.x_offset, 
+                process.geometry.y_offset, 
+                process.geometry.width, 
+                process.geometry.height})
+        };
+
+        // The format is "x,y WxH"
+
+        var args = try allocator.alloc([]const u8, args_tmp.len);
+        for (args_tmp, 0..) |arg, i| {
+            args[i] = try allocator.dupe(u8, arg);
+        }
+
+        const child = std.process.Child.init(args, allocator);
+
+        return .{
+            .child = child,
+            .child_args = args,
+        };
+    }
+
+    // TODO: Create deinit fn
+
+    pub fn start_recording(self: *Recorder) !void {
+        _ = try self.child.?.spawn();
+    }
+
+    pub fn stop_recording(self: *Recorder) !void {
+        _ = try self.child.?.kill();
+    }
+};
+
 const NS_PER_MS: u64 = 1_000_000;
 
 pub fn main() !void {
@@ -155,46 +204,3 @@ fn get_processes(allocator: std.mem.Allocator) !std.ArrayList(Process) {
 
     return processes;
 }
-
-const Recorder = struct {
-    child: ?std.process.Child = null,
-    child_args: [][]const u8,
-
-    pub fn init(allocator: std.mem.Allocator, process: *const Process, config: *const Config) !Recorder {
-        const datestr = try get_datestr(allocator);
-        defer allocator.free(datestr);
-
-        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}-{s}.mp4", .{config.output_dir, process.name, datestr});
-        defer allocator.free(full_path);
-
-        // TODO: We have to make this args same lifetime as our struct then free it in the deinit
-        const args_tmp = [_][]const u8 {
-            "wf-recorder", 
-            "-f", full_path, 
-            "--framerate", try config.framerate_as_str(allocator), 
-            "--overwrite"
-        };
-
-        var args = try allocator.alloc([]const u8, args_tmp.len);
-        for (args_tmp, 0..) |arg, i| {
-            args[i] = try allocator.dupe(u8, arg);
-        }
-
-        const child = std.process.Child.init(args, allocator);
-
-        return .{
-            .child = child,
-            .child_args = args,
-        };
-    }
-
-    // TODO: Create deinit fn
-
-    pub fn start_recording(self: *Recorder) !void {
-        _ = try self.child.?.spawn();
-    }
-
-    pub fn stop_recording(self: *Recorder) !void {
-        _ = try self.child.?.kill();
-    }
-};
