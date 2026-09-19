@@ -1,6 +1,75 @@
 const std = @import("std");
 
 const reminiscence = @import("reminiscence");
+const gui = @import("gui.zig");
+const rl = @import("raylib");
+
+fn worker(config: Config, allocator: std.mem.Allocator, io: std.Io) !void {
+    while (true) {
+        // should probably create thread for the recorder
+        var processes = try get_visible_windows(allocator, io);
+        defer processes.deinit(allocator);
+        defer {
+            for (processes.items) |p| {
+                p.deinit(allocator);
+            }
+        }
+
+        if (processes.items.len > 0) {
+            std.debug.print("Found {} process/es\n", .{processes.items.len});
+            for (processes.items) |p| {
+                std.debug.print("{f}\n", .{p});
+            }
+
+            const process = &processes.items[0];
+            var rec: Recorder = try Recorder.init(allocator, io, process, &config);
+            try rec.start_recording(io);
+            std.debug.print("Starting recording with process: {f}\n", .{process});
+
+            // Break this into another fn?
+            // Keep recording until our original process is no longer running
+            while (true) {
+                var processes2 = try get_visible_windows(allocator, io);
+                defer processes2.deinit(allocator);
+
+                var still_running: bool = false;
+                for (processes2.items) |p2| {
+                    if (Process.eql(process.*, p2)) {
+                        still_running = true;
+                        break;
+                    }
+                }
+                if (!still_running) break;
+
+                try std.Io.sleep(io, .fromMilliseconds(1000), .awake);
+            }
+
+            rec.stop_recording(io);
+            std.debug.print("Stopped recording for process {f}\n", .{process});
+        }
+        else {
+            std.debug.print("No processes found\n", .{});
+        }
+
+        try std.Io.sleep(io, .fromMilliseconds(1000), .awake);
+    }
+}
+
+pub fn main(init: std.process.Init) !void {
+    gui.init();
+
+    const config = Config{
+        .framerate = 60,
+        .output_dir = "./Recordings/",
+    };
+
+    // Spawn recorder thread
+    _ = try std.Thread.spawn(.{}, worker, .{config, init.gpa, init.io});
+
+    while (true) {
+        try gui.advance();
+    }
+}
 
 const Config = struct {
     framerate: u16,
@@ -89,64 +158,6 @@ const Recorder = struct {
 };
 
 const NS_PER_MS: u64 = 1_000_000;
-
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
-    const io = init.io;
-
-    const config = Config{
-        .framerate = 60,
-        .output_dir = "./Recordings/",
-    };
-
-    while (true) {
-        var processes = try get_visible_windows(allocator, io);
-        defer processes.deinit(allocator);
-        defer {
-            for (processes.items) |p| {
-                p.deinit(allocator);
-            }
-        }
-
-        if (processes.items.len > 0) {
-            std.debug.print("Found {} process/es\n", .{processes.items.len});
-            for (processes.items) |p| {
-                std.debug.print("{f}\n", .{p});
-            }
-
-            const process = &processes.items[0];
-            var rec: Recorder = try Recorder.init(allocator, io, process, &config);
-            try rec.start_recording(io);
-            std.debug.print("Starting recording with process: {f}\n", .{process});
-
-            // Break this into another fn?
-            // Keep recording until our original process is no longer running
-            while (true) {
-                var processes2 = try get_visible_windows(allocator, io);
-                defer processes2.deinit(allocator);
-
-                var still_running: bool = false;
-                for (processes2.items) |p2| {
-                    if (Process.eql(process.*, p2)) {
-                        still_running = true;
-                        break;
-                    }
-                }
-                if (!still_running) break;
-
-                try std.Io.sleep(io, .fromMilliseconds(1000), .awake);
-            }
-
-            rec.stop_recording(io);
-            std.debug.print("Stopped recording for process {f}\n", .{process});
-        }
-        else {
-            std.debug.print("No processes found\n", .{});
-        }
-
-        try std.Io.sleep(io, .fromMilliseconds(1000), .awake);
-    }
-}
 
 fn get_datestr(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     const timestamp_ns = std.Io.Clock.real.now(io).nanoseconds;

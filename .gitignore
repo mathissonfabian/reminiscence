@@ -5,3 +5,5 @@ FFmpeg/
 bin/
 nv-codec-headers/
 .zig-cache
+zig-out/
+zig-pkg/
