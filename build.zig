@@ -114,6 +114,15 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_exe_tests.step);
 
+    // A build step that only type-checks the exe (no linking/install), used
+    // by zls's build-on-save to surface real compile errors as diagnostics.
+    const exe_check = b.addExecutable(.{
+        .name = "reminiscence-check",
+        .root_module = exe.root_module,
+    });
+    const check_step = b.step("check", "Check if the project compiles");
+    check_step.dependOn(&exe_check.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

@@ -1,13 +1,13 @@
 const std = @import("std");
 
-const reminiscence = @import("reminiscence");
+const recorder = @import("recorder.zig");
 const gui = @import("gui.zig");
 const rl = @import("raylib");
 
-fn worker(config: Config, allocator: std.mem.Allocator, io: std.Io) !void {
+fn process_monitor(config: recorder.Config, allocator: std.mem.Allocator, io: std.Io) !void {
     while (true) {
         // should probably create thread for the recorder
-        var processes = try get_visible_windows(allocator, io);
+        var processes = try recorder.get_visible_windows(allocator, io);
         defer processes.deinit(allocator);
         defer {
             for (processes.items) |p| {
@@ -22,19 +22,18 @@ fn worker(config: Config, allocator: std.mem.Allocator, io: std.Io) !void {
             }
 
             const process = &processes.items[0];
-            var rec: Recorder = try Recorder.init(allocator, io, process, &config);
-            try rec.start_recording(io);
+            try recorder.instance.start_recording(config, process.*, allocator, io);
             std.debug.print("Starting recording with process: {f}\n", .{process});
 
             // Break this into another fn?
             // Keep recording until our original process is no longer running
             while (true) {
-                var processes2 = try get_visible_windows(allocator, io);
+                var processes2 = try recorder.get_visible_windows(allocator, io);
                 defer processes2.deinit(allocator);
 
                 var still_running: bool = false;
                 for (processes2.items) |p2| {
-                    if (Process.eql(process.*, p2)) {
+                    if (recorder.Process.eql(process.*, p2)) {
                         still_running = true;
                         break;
                     }
@@ -44,7 +43,7 @@ fn worker(config: Config, allocator: std.mem.Allocator, io: std.Io) !void {
                 try std.Io.sleep(io, .fromMilliseconds(1000), .awake);
             }
 
-            rec.stop_recording(io);
+            recorder.instance.stop_recording(io);
             std.debug.print("Stopped recording for process {f}\n", .{process});
         }
         else {
@@ -58,182 +57,17 @@ fn worker(config: Config, allocator: std.mem.Allocator, io: std.Io) !void {
 pub fn main(init: std.process.Init) !void {
     gui.init();
 
-    const config = Config{
+    const config = recorder.Config{
         .framerate = 60,
         .output_dir = "./Recordings/",
     };
 
     // Spawn recorder thread
-    _ = try std.Thread.spawn(.{}, worker, .{config, init.gpa, init.io});
+    _ = try std.Thread.spawn(.{}, process_monitor, .{config, init.gpa, init.io});
 
     while (true) {
         try gui.advance();
+        try std.Io.sleep(init.io, .fromMilliseconds(1000), .awake);
     }
 }
 
-const Config = struct {
-    framerate: u16,
-    output_dir: []const u8,
-
-    fn framerate_as_str(self: Config, allocator: std.mem.Allocator) ![]const u8 {
-        return try std.fmt.allocPrint(allocator, "{}", .{self.framerate});
-    }
-};
-
-const Process = struct {
-    name: []const u8,
-    machine_name: []const u8,
-    pid: u32,
-    desktop_id: i32,
-    geometry: struct {
-        x_offset: i32,
-        y_offset: i32,
-        width: u32,
-        height: u32,
-    },
-
-    pub fn deinit(self: Process, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-        allocator.free(self.machine_name);
-    }
-
-    pub fn format(self: Process, writer: *std.Io.Writer) !void {
-        try writer.print("{s}; pid: {}; workspace: {}; geometry: {}", .{self.name, self.pid, self.desktop_id, self.geometry});
-    }
-
-    pub fn eql(item1: Process, item2: Process) bool {
-        if (!std.mem.eql(u8, item1.name, item2.name)) return false;
-        if (item1.pid != item2.pid) return false;
-
-        return true;
-    }
-};
-
-const Recorder = struct {
-    child: ?std.process.Child = null,
-    child_args: [][]const u8,
-
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, process: *const Process, config: *const Config) !Recorder {
-        const datestr = try get_datestr(allocator, io);
-        defer allocator.free(datestr);
-
-        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}-{s}.mp4", .{config.output_dir, process.name, datestr});
-        defer allocator.free(full_path);
-
-        const args_tmp = [_][]const u8 {
-            "wf-recorder",
-            "-f", full_path,
-            "--framerate", try config.framerate_as_str(allocator),
-            "--overwrite",
-            "--geometry", try std.fmt.allocPrint(allocator, "{},{} {}x{}", .{
-                process.geometry.x_offset,
-                process.geometry.y_offset,
-                process.geometry.width,
-                process.geometry.height})
-        };
-
-        // The format is "x,y WxH"
-
-        var args = try allocator.alloc([]const u8, args_tmp.len);
-        for (args_tmp, 0..) |arg, i| {
-            args[i] = try allocator.dupe(u8, arg);
-        }
-
-        return .{
-            .child = null,
-            .child_args = args,
-        };
-    }
-
-    // TODO: Create deinit fn
-
-    pub fn start_recording(self: *Recorder, io: std.Io) !void {
-        self.child = try std.process.spawn(io, .{ .argv = self.child_args });
-    }
-
-    pub fn stop_recording(self: *Recorder, io: std.Io) void {
-        self.child.?.kill(io);
-        self.child = null;
-    }
-};
-
-const NS_PER_MS: u64 = 1_000_000;
-
-fn get_datestr(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
-    const timestamp_ns = std.Io.Clock.real.now(io).nanoseconds;
-    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(@divTrunc(timestamp_ns, std.time.ns_per_s)) };
-    const epoch_day = epoch_seconds.getEpochDay();
-    const day_seconds = epoch_seconds.getDaySeconds();
-    const year_day = epoch_day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-
-    return try std.fmt.allocPrint(allocator, "{}-{}-{}-{}-{}", 
-        .{year_day.year, month_day.month.numeric(), month_day.day_index+1, day_seconds.getHoursIntoDay(), day_seconds.getMinutesIntoHour()});
-}
-
-const HyprMonitor = struct {
-    activeWorkspace: struct { id: i32 },
-};
-
-const HyprClient = struct {
-    mapped: bool,
-    hidden: bool,
-    at: [2]i32,
-    size: [2]u32,
-    workspace: struct { id: i32 },
-    class: []const u8,
-    title: []const u8,
-    pid: u32,
-};
-
-fn run_hyprctl(allocator: std.mem.Allocator, io: std.Io, comptime subcommand: []const u8) !std.process.RunResult {
-    return try std.process.run(allocator, io, .{
-        .argv = &.{ "hyprctl", subcommand, "-j" },
-    });
-}
-
-/// Returns the windows on whichever workspace is currently shown on some monitor.
-/// Hyprland keeps geometry for windows on non-visible workspaces too, but that
-/// geometry doesn't correspond to any actual on-screen position, so those
-/// windows are filtered out here.
-fn get_visible_windows(allocator: std.mem.Allocator, io: std.Io) !std.ArrayList(Process) {
-    var processes: std.ArrayList(Process) = .empty;
-
-    const monitors_result = try run_hyprctl(allocator, io, "monitors");
-    defer allocator.free(monitors_result.stdout);
-    defer allocator.free(monitors_result.stderr);
-
-    const monitors_parsed = try std.json.parseFromSlice([]HyprMonitor, allocator, monitors_result.stdout, .{ .ignore_unknown_fields = true });
-    defer monitors_parsed.deinit();
-
-    const clients_result = try run_hyprctl(allocator, io, "clients");
-    defer allocator.free(clients_result.stdout);
-    defer allocator.free(clients_result.stderr);
-
-    const clients_parsed = try std.json.parseFromSlice([]HyprClient, allocator, clients_result.stdout, .{ .ignore_unknown_fields = true });
-    defer clients_parsed.deinit();
-
-    for (clients_parsed.value) |client| {
-        if (!client.mapped or client.hidden) continue;
-
-        const is_visible = for (monitors_parsed.value) |monitor| {
-            if (monitor.activeWorkspace.id == client.workspace.id) break true;
-        } else false;
-        if (!is_visible) continue;
-
-        try processes.append(allocator, .{
-            .pid = client.pid,
-            .desktop_id = client.workspace.id,
-            .geometry = .{
-                .x_offset = client.at[0],
-                .y_offset = client.at[1],
-                .width = client.size[0],
-                .height = client.size[1],
-            },
-            .machine_name = try allocator.dupe(u8, client.class),
-            .name = try allocator.dupe(u8, client.title),
-        });
-    }
-
-    return processes;
-}
