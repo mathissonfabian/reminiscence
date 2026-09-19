@@ -14,12 +14,11 @@ const Config = struct {
 const Process = struct {
     name: []const u8,
     machine_name: []const u8,
-    pid: u16,
-    wid: u32,
-    desktop_id: u16,
+    pid: u32,
+    desktop_id: i32,
     geometry: struct {
-        x_offset: i32,  
-        y_offset: i32,  
+        x_offset: i32,
+        y_offset: i32,
         width: u32,
         height: u32,
     },
@@ -29,8 +28,8 @@ const Process = struct {
         allocator.free(self.machine_name);
     }
 
-    pub fn format(self: Process, writer: *std.io.Writer) !void {
-        try writer.print("{s}; pid: {}; wid: {}; geometry: {}", .{self.name, self.pid, self.wid, self.geometry});
+    pub fn format(self: Process, writer: *std.Io.Writer) !void {
+        try writer.print("{s}; pid: {}; workspace: {}; geometry: {}", .{self.name, self.pid, self.desktop_id, self.geometry});
     }
 
     pub fn eql(item1: Process, item2: Process) bool {
@@ -45,22 +44,22 @@ const Recorder = struct {
     child: ?std.process.Child = null,
     child_args: [][]const u8,
 
-    pub fn init(allocator: std.mem.Allocator, process: *const Process, config: *const Config) !Recorder {
-        const datestr = try get_datestr(allocator);
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, process: *const Process, config: *const Config) !Recorder {
+        const datestr = try get_datestr(allocator, io);
         defer allocator.free(datestr);
 
         const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}-{s}.mp4", .{config.output_dir, process.name, datestr});
         defer allocator.free(full_path);
 
         const args_tmp = [_][]const u8 {
-            "wf-recorder", 
-            "-f", full_path, 
-            "--framerate", try config.framerate_as_str(allocator), 
+            "wf-recorder",
+            "-f", full_path,
+            "--framerate", try config.framerate_as_str(allocator),
             "--overwrite",
             "--geometry", try std.fmt.allocPrint(allocator, "{},{} {}x{}", .{
-                process.geometry.x_offset, 
-                process.geometry.y_offset, 
-                process.geometry.width, 
+                process.geometry.x_offset,
+                process.geometry.y_offset,
+                process.geometry.width,
                 process.geometry.height})
         };
 
@@ -71,39 +70,37 @@ const Recorder = struct {
             args[i] = try allocator.dupe(u8, arg);
         }
 
-        const child = std.process.Child.init(args, allocator);
-
         return .{
-            .child = child,
+            .child = null,
             .child_args = args,
         };
     }
 
     // TODO: Create deinit fn
 
-    pub fn start_recording(self: *Recorder) !void {
-        _ = try self.child.?.spawn();
+    pub fn start_recording(self: *Recorder, io: std.Io) !void {
+        self.child = try std.process.spawn(io, .{ .argv = self.child_args });
     }
 
-    pub fn stop_recording(self: *Recorder) !void {
-        _ = try self.child.?.kill();
+    pub fn stop_recording(self: *Recorder, io: std.Io) void {
+        self.child.?.kill(io);
+        self.child = null;
     }
 };
 
 const NS_PER_MS: u64 = 1_000_000;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     const config = Config{
-        .framerate = 60, 
+        .framerate = 60,
         .output_dir = "./Recordings/",
     };
 
     while (true) {
-        var processes = try get_processes(allocator);
+        var processes = try get_visible_windows(allocator, io);
         defer processes.deinit(allocator);
         defer {
             for (processes.items) |p| {
@@ -118,14 +115,14 @@ pub fn main() !void {
             }
 
             const process = &processes.items[0];
-            var rec: Recorder = try Recorder.init(allocator, process, &config);
-            try rec.start_recording();
+            var rec: Recorder = try Recorder.init(allocator, io, process, &config);
+            try rec.start_recording(io);
             std.debug.print("Starting recording with process: {f}\n", .{process});
 
             // Break this into another fn?
             // Keep recording until our original process is no longer running
             while (true) {
-                var processes2 = try get_processes(allocator);
+                var processes2 = try get_visible_windows(allocator, io);
                 defer processes2.deinit(allocator);
 
                 var still_running: bool = false;
@@ -137,22 +134,23 @@ pub fn main() !void {
                 }
                 if (!still_running) break;
 
-                std.Thread.sleep(1000 * NS_PER_MS);
+                try std.Io.sleep(io, .fromMilliseconds(1000), .awake);
             }
 
-            try rec.stop_recording();
+            rec.stop_recording(io);
             std.debug.print("Stopped recording for process {f}\n", .{process});
         }
         else {
             std.debug.print("No processes found\n", .{});
         }
 
-        std.Thread.sleep(1000 * NS_PER_MS);
+        try std.Io.sleep(io, .fromMilliseconds(1000), .awake);
     }
 }
 
-fn get_datestr(allocator: std.mem.Allocator) ![]u8 {
-    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(std.time.timestamp()) };
+fn get_datestr(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+    const timestamp_ns = std.Io.Clock.real.now(io).nanoseconds;
+    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = @intCast(@divTrunc(timestamp_ns, std.time.ns_per_s)) };
     const epoch_day = epoch_seconds.getEpochDay();
     const day_seconds = epoch_seconds.getDaySeconds();
     const year_day = epoch_day.calculateYearDay();
@@ -162,44 +160,68 @@ fn get_datestr(allocator: std.mem.Allocator) ![]u8 {
         .{year_day.year, month_day.month.numeric(), month_day.day_index+1, day_seconds.getHoursIntoDay(), day_seconds.getMinutesIntoHour()});
 }
 
-fn get_processes(allocator: std.mem.Allocator) !std.ArrayList(Process) {
+const HyprMonitor = struct {
+    activeWorkspace: struct { id: i32 },
+};
+
+const HyprClient = struct {
+    mapped: bool,
+    hidden: bool,
+    at: [2]i32,
+    size: [2]u32,
+    workspace: struct { id: i32 },
+    class: []const u8,
+    title: []const u8,
+    pid: u32,
+};
+
+fn run_hyprctl(allocator: std.mem.Allocator, io: std.Io, comptime subcommand: []const u8) !std.process.RunResult {
+    return try std.process.run(allocator, io, .{
+        .argv = &.{ "hyprctl", subcommand, "-j" },
+    });
+}
+
+/// Returns the windows on whichever workspace is currently shown on some monitor.
+/// Hyprland keeps geometry for windows on non-visible workspaces too, but that
+/// geometry doesn't correspond to any actual on-screen position, so those
+/// windows are filtered out here.
+fn get_visible_windows(allocator: std.mem.Allocator, io: std.Io) !std.ArrayList(Process) {
     var processes: std.ArrayList(Process) = .empty;
 
-    const args = .{
-        "wmctrl",
-        "-l",
-        "-p",
-        "-G"
-    };
+    const monitors_result = try run_hyprctl(allocator, io, "monitors");
+    defer allocator.free(monitors_result.stdout);
+    defer allocator.free(monitors_result.stderr);
 
-    const result = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &args,
-    });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
+    const monitors_parsed = try std.json.parseFromSlice([]HyprMonitor, allocator, monitors_result.stdout, .{ .ignore_unknown_fields = true });
+    defer monitors_parsed.deinit();
 
-    // This is the output format
-    // 0x0240004a  0 13832  1460 740  1100 700  omarchy Steam
-    var iter = std.mem.splitScalar(u8, result.stdout, '\n');
-    while (iter.next()) |line| {
-        if (line.len == 0) continue;
-        var line_iter = std.mem.tokenizeScalar(u8, line, ' ');
-        const process = Process{
-            .wid = try std.fmt.parseInt(u32, line_iter.next().?, 0),
-            .desktop_id = try std.fmt.parseInt(u16, line_iter.next().?, 10),
-            .pid = try std.fmt.parseInt(u16, line_iter.next().?, 10),
+    const clients_result = try run_hyprctl(allocator, io, "clients");
+    defer allocator.free(clients_result.stdout);
+    defer allocator.free(clients_result.stderr);
+
+    const clients_parsed = try std.json.parseFromSlice([]HyprClient, allocator, clients_result.stdout, .{ .ignore_unknown_fields = true });
+    defer clients_parsed.deinit();
+
+    for (clients_parsed.value) |client| {
+        if (!client.mapped or client.hidden) continue;
+
+        const is_visible = for (monitors_parsed.value) |monitor| {
+            if (monitor.activeWorkspace.id == client.workspace.id) break true;
+        } else false;
+        if (!is_visible) continue;
+
+        try processes.append(allocator, .{
+            .pid = client.pid,
+            .desktop_id = client.workspace.id,
             .geometry = .{
-                .x_offset = try std.fmt.parseInt(i32, line_iter.next().?, 10),
-                .y_offset = try std.fmt.parseInt(i32, line_iter.next().?, 10),
-                .width = try std.fmt.parseInt(u32, line_iter.next().?, 10),
-                .height = try std.fmt.parseInt(u32, line_iter.next().?, 10),
+                .x_offset = client.at[0],
+                .y_offset = client.at[1],
+                .width = client.size[0],
+                .height = client.size[1],
             },
-            .machine_name = try allocator.dupe(u8, line_iter.next().?),
-            .name = try allocator.dupe(u8, line_iter.rest()),
-        };
-        
-        try processes.append(allocator, process);
+            .machine_name = try allocator.dupe(u8, client.class),
+            .name = try allocator.dupe(u8, client.title),
+        });
     }
 
     return processes;
