@@ -67,6 +67,11 @@ const Recorder = struct {
             "-f", full_path,
             "--framerate", try config.framerate_as_str(allocator),
             "--overwrite",
+            "--codec", "hevc_nvenc",
+            "--codec-param", "preset=p5",
+            "--codec-param", "tune=hq",
+            "--codec-param", "rc=vbr",
+            "--codec-param", "cq=26",
             try std.fmt.allocPrint(allocator, "--audio={s}", .{self.audio_source.?}),
             "--geometry", try std.fmt.allocPrint(allocator, "{},{} {}x{}", .{
                 process.geometry.x_offset,
