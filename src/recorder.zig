@@ -44,10 +44,15 @@ const Recorder = struct {
     child: ?std.process.Child = null,
     child_args: [][]const u8,
     process: ?Process = null,
+    audio_source: ?[]const u8 = null,
+    is_recording: bool = false,
 
     // TODO: Create deinit fn
 
     pub fn start_recording(self: *Recorder, config: Config, process: Process, allocator: std.mem.Allocator, io: std.Io) !void {
+        self.audio_source = try get_default_audio(allocator, io);
+        std.debug.print("Recording with device {s}\n", .{self.audio_source.?});
+
         const datestr = try get_datestr(allocator, io);
         defer allocator.free(datestr);
 
@@ -62,6 +67,7 @@ const Recorder = struct {
             "-f", full_path,
             "--framerate", try config.framerate_as_str(allocator),
             "--overwrite",
+            try std.fmt.allocPrint(allocator, "--audio={s}", .{self.audio_source.?}),
             "--geometry", try std.fmt.allocPrint(allocator, "{},{} {}x{}", .{
                 process.geometry.x_offset,
                 process.geometry.y_offset,
@@ -69,11 +75,17 @@ const Recorder = struct {
                 process.geometry.height})
         };
 
+        std.debug.print("wf-recorder args:\n", .{});
+        for (args_tmp) |arg| {
+            std.debug.print("{s} ", .{arg});
+        }
         // The format is "x,y WxH"
         var args = try allocator.alloc([]const u8, args_tmp.len);
         for (args_tmp, 0..) |arg, i| {
             args[i] = try allocator.dupe(u8, arg);
         }
+
+        self.is_recording = true;
 
         self.child = try std.process.spawn(io, .{ .argv = args });
         self.process = process;
@@ -83,6 +95,16 @@ const Recorder = struct {
         self.child.?.kill(io);
         self.child = null;
         self.process = null;
+        self.is_recording = false;
+    }
+
+    pub fn get_audio_source() void {
+        // todo 
+        // pactl list sources | grep Name
+    }
+
+    pub fn set_audio_source() void {
+        // todo 
     }
 };
 
@@ -179,3 +201,12 @@ pub fn get_visible_windows(allocator: std.mem.Allocator, io: std.Io) !std.ArrayL
     return processes;
 }
 
+fn get_default_audio(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+    const res = try std.process.run(allocator, io, .{.argv = &.{"pactl", "get-default-sink"}});
+    defer allocator.free(res.stdout);
+    defer allocator.free(res.stderr);
+
+    const trimmed = std.mem.trim(u8, res.stdout, &.{'\n'});
+    
+    return try std.fmt.allocPrint(allocator, "{s}.monitor", .{trimmed});
+}
