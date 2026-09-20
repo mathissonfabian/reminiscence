@@ -51,7 +51,10 @@ const Recorder = struct {
         const datestr = try get_datestr(allocator, io);
         defer allocator.free(datestr);
 
-        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}-{s}.mp4", .{config.output_dir, process.name, datestr});
+        const safe_name = try sanitize_filename(allocator, process.name);
+        defer allocator.free(safe_name);
+
+        const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}-{s}.mp4", .{config.output_dir, safe_name, datestr});
         defer allocator.free(full_path);
 
         const args_tmp = [_][]const u8 {
@@ -84,6 +87,18 @@ const Recorder = struct {
 };
 
 const NS_PER_MS: u64 = 1_000_000;
+
+/// Window titles can contain '/', which would otherwise be interpreted as a
+/// path separator (e.g. Reddit tab titles like "... : r/sweden - Chromium"),
+/// causing ffmpeg's avio_open to fail because the resulting subdirectory
+/// doesn't exist.
+fn sanitize_filename(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    const sanitized = try allocator.dupe(u8, name);
+    for (sanitized) |*c| {
+        if (c.* == '/') c.* = '-';
+    }
+    return sanitized;
+}
 
 fn get_datestr(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     const timestamp_ns = std.Io.Clock.real.now(io).nanoseconds;
