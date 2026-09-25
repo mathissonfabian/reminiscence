@@ -53,4 +53,19 @@ pub fn advance() !void {
     const rec_audio_size = 20;
     const rec_audio_width = rl.measureText(audio_source, rec_audio_size);
     rl.drawText(audio_source, @divTrunc(windowWidth - rec_audio_width, 2), windowHeight/2+40, rec_audio_size, .light_gray);
+
+    try draw_button("Record", windowWidth-200, 200);
+    try draw_button("Stop", windowWidth-200, 300);
+}
+
+// TODO: Register callback, scale button after button text
+fn draw_button(text: [:0]const u8, posX: i32, posY: i32) !void
+{
+    const FONT_SIZE: i32 = 24;
+    const BTN_WIDTH: i32 = 150;
+    const BTN_HEIGHT: i32 = 70;
+
+    rl.drawRectangle(posX, posY, BTN_WIDTH, BTN_HEIGHT, .gold);
+    const txt_msm = rl.measureTextEx(try rl.getFontDefault(), text, FONT_SIZE, FONT_SIZE/10);
+    rl.drawText(text, posX+(@divTrunc(BTN_WIDTH - @as(i32, @intFromFloat(txt_msm.x)), 2)), posY+(@divTrunc(BTN_HEIGHT - @as(i32, @intFromFloat(txt_msm.y)), 2)), FONT_SIZE, .black);
 }
